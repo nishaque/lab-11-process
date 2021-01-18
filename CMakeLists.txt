@@ -45,9 +45,6 @@ add_library(${PROJECT_NAME} STATIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include/builder.h
 )
 
-add_executable(builder
-  ${CMAKE_CURRENT_SOURCE_DIR}/demo/main.cpp
-)
 
 target_include_directories(${PROJECT_NAME} PUBLIC
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
