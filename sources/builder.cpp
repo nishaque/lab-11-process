@@ -1,104 +1,59 @@
-#include "builder.h"
-#include <async++.h>
-#include <vector>
-#include <chrono>
-#include <iostream>
-#include <atomic>
-#include <boost/process.hpp>
-#include <boost/process/initializers.hpp>
-#include <boost/iostreams/stream.hpp>
+// Copyright 2021 Timoshenko Yulia timoshenkojulie01@gmail.com
+#include "builder.hpp"
+void Builder::execute_cmake(std::list<std::string>& args) {
+  if (status != 0) {
+    done = true;
+    return;
+  }
+  boost::process::ipstream pipe_stream;
+  process = std::make_unique<boost::process::child>(boost::process::child{
+      boost::process::search_path("cmake"), boost::process::args(args),
+      boost::process::std_out > pipe_stream});
 
-std::chrono::seconds seconds_now(){
-  return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch());
+  for (std::string line; process->running() && std::getline(pipe_stream, line);)
+    std::cout << line << std::endl;
+  process->wait();
+  status = process->exit_code();
 }
 
-void build(const std::string& config, int timeout, bool b_install, bool b_pack){
-  std::atomic_bool done = false;
+std::chrono::seconds seconds_now() {
+  return std::chrono::duration_cast<std::chrono::seconds>(
+      std::chrono::system_clock::now().time_since_epoch());
+}
+void Builder::timeout(int seconds) {
   auto start = seconds_now();
-  std::vector<boost::process::child> processes;
-  auto timing = async::spawn([&] {
-    while(!done and ((seconds_now() - start).count() < timeout)) {
-      std::this_thread::yield();
-    }
-    if (done) return;
-    for (auto& c : processes) {
-      boost::process::terminate(c);
-    }
-    std::cout<<"Время ожидания истекло" << std::endl;
+  while (!done and ((seconds_now() - start).count() < seconds)) {
+    std::this_thread::yield();
+  }
+  process->terminate();
+  throw std::runtime_error("время ожидания истекло");
+}
+void Builder::build(const std::string& config, int timeout, bool b_install,
+                    bool b_pack) {
+  async::spawn([&, this] { this->timeout(timeout); });
+  auto make = async::spawn([&, this]() {
+    std::list<std::string> args{"-H.", "-B_builds",
+                                "-DCMAKE_INSTALL_PREFIX=_install",
+                                "-DCMAKE_BUILD_TYPE=" + config};
+    this->execute_cmake(args);
   });
-
-  timing.then([&] () {
-
+  auto build = make.then([&, this]() {
+    std::list<std::string> args{"--build", "_builds"};
+    this->execute_cmake(args);
   });
-
-  boost::process::pipe pipe_stdout = boost::process::create_pipe();
-
-  boost::iostreams::file_descriptor_source source_stdout(pipe_stdout.source, boost::iostreams::close_handle);
-
-  boost::iostreams::stream<boost::iostreams::file_descriptor_source> stream_stdout(source_stdout);
-
-  auto cmake_path = "/usr/bin/cmake";
-
-  auto make = async::spawn([&]() {
-    {
-      boost::iostreams::file_descriptor_sink sink_stdout(
-          pipe_stdout.sink, boost::iostreams::close_handle);
-      auto p =
-          boost::process::execute(
-          boost::process::initializers::set_args(
-              std::vector<std::string>{
-          cmake_path, "-H.", "-B_builds", "-DCMAKE_INSTALL_PREFIX=_install",
-          "-DCMAKE_BUILD_TYPE=" + config}),
-              boost::process::initializers::throw_on_error(),
-          boost::process::initializers::bind_stdout(sink_stdout),
-      boost::process::initializers::inherit_env());
-      processes.push_back(p);
-      boost::process::wait_for_exit(p);
-    }
-  });
-  auto build = make.then([&](){
-    {
-      boost::iostreams::file_descriptor_sink sink_stdout(
-          pipe_stdout.sink, boost::iostreams::close_handle);
-      auto p =
-          boost::process::execute(
-              boost::process::initializers::set_args(
-                  std::vector<std::string>{cmake_path, "--build", "_builds"}),
-              boost::process::initializers::throw_on_error(),
-              boost::process::initializers::bind_stdout(sink_stdout),
-              boost::process::initializers::inherit_env());
-      processes.push_back(p);
-      boost::process::wait_for_exit(p);
-    }
-  });
-  auto install = build.then([&]() {
-    if (b_install)
-    {
-      boost::iostreams::file_descriptor_sink sink_stdout(
-          pipe_stdout.sink, boost::iostreams::close_handle);
-      auto p =
-          boost::process::execute(
-              boost::process::initializers::set_args(
-                  std::vector<std::string>{cmake_path, "--build", "_builds", "--target", "install"}),
-              boost::process::initializers::throw_on_error(),
-              boost::process::initializers::bind_stdout(sink_stdout));
-      processes.push_back(p);
-      boost::process::wait_for_exit(p);
+  auto install = build.then([&, this]() {
+    if (b_install) {
+      std::list<std::string> args{"--build", "_builds", "--target", "install"};
+      this->execute_cmake(args);
     }
   });
   auto pack = install.then([&]() {
-    if (b_pack)
-    {
-      boost::iostreams::file_descriptor_sink sink_stdout(
-          pipe_stdout.sink, boost::iostreams::close_handle);
-      auto p =
-          boost::process::execute(
-              boost::process::initializers::set_args(
-                  std::vector<std::string>{cmake_path, "--build", "_builds", "--target", "package"}),
-              boost::process::initializers::throw_on_error(),
-              boost::process::initializers::bind_stdout(sink_stdout));
-      processes.push_back(p);
-      boost::process::wait_for_exit(p);
+    if (b_pack) {
+      if (b_install) {
+        std::list<std::string> args{"--build", "_builds", "--target",
+                                    "package"};
+        this->execute_cmake(args);
+      }
     }
     done = true;
   });
